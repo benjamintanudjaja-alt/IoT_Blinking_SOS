@@ -1,0 +1,554 @@
+# Functional Specification Document (FSD)
+## SOS Blinking LED with OTA Update - ESP32-C3
+
+**Document Version**: 1.0  
+**Date**: February 27, 2026  
+**Author**: Embedded Systems  
+**Status**: Active  
+
+---
+
+## 1. Introduction
+
+This document specifies the functional requirements for an SOS blinking LED firmware with wireless Over-The-Air (OTA) update capability for the LuatOS CORE-ESP32 C3 microcontroller board. The firmware implements an emergency signal pattern (SOS in Morse code) using an onboard LED while maintaining WiFi connectivity and supporting remote firmware updates without physical access to the device.
+
+### 1.1 Purpose
+To provide a reliable, non-blocking embedded system that continuously signals SOS patterns while remaining responsive to network updates and user commands.
+
+### 1.2 Scope
+- Single ESP32-C3 microcontroller board
+- Onboard LED control (GPIO 13)
+- WiFi connectivity with automatic reconnection
+- HTTP-based OTA firmware updates with SHA-256 signature verification
+- Real-time logging via serial interface
+- FreeRTOS-based multi-tasking architecture
+
+---
+
+## 2. System Overview
+
+### 2.1 High-Level Architecture
+The system employs a multi-task FreeRTOS architecture with the following concurrent tasks:
+
+```
+┌─────────────────────────────────────────────┐
+│         Main Application (ESP32-C3)          │
+├─────────────────────────────────────────────┤
+│  ┌──────────────────────────────────────┐  │
+│  │  LED Task (Priority 1)               │  │
+│  │  - Generate SOS Morse code pattern   │  │
+│  │  - Control GPIO 13 (LED)             │  │
+│  └──────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────┐  │
+│  │  WiFi Task (Priority 3)              │  │
+│  │  - SSID/Password authentication      │  │
+│  │  - Connection retry logic            │  │
+│  │  - Connection status management      │  │
+│  └──────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────┐  │
+│  │  OTA Task (Priority 3)               │  │
+│  │  - HTTP firmware download            │  │
+│  │  - SHA-256 verification              │  │
+│  │  - Flash write & reboot              │  │
+│  └──────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────┐  │
+│  │  Logger Task (Priority 2)            │  │
+│  │  - Serial output (queue-based)       │  │
+│  │  - Log level filtering               │  │
+│  └──────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────┐  │
+│  │  Serial Handler (Priority 4)         │  │
+│  │  - Command parsing                   │  │
+│  │  - OTA trigger                       │  │
+│  └──────────────────────────────────────┘  │
+└─────────────────────────────────────────────┘
+```
+
+### 2.2 Data Flow
+1. **LED Pattern Generation**: LED task maintains internal state machine for SOS pattern
+2. **Logging**: All tasks send log messages via queue to Logger task; Logger task outputs to serial
+3. **OTA Update**: OTA task suspends LED task, performs update, resumes LED task
+4. **Serial Commands**: Main loop monitors serial input and queues OTA update request
+
+### 2.3 Key Design Principles
+- **Non-Blocking**: All tasks use `vTaskDelay()` instead of `delay()` for CPU efficiency
+- **Queue-Based Logging**: Prevents serial I/O race conditions and blocking in time-critical tasks
+- **Task Isolation**: LED task remains independent of network operations
+- **Graceful Degradation**: LED task continues even if OTA or WiFi tasks fail
+
+---
+
+## 3. Hardware Specification
+
+### 3.1 Board Information
+- **Board Model**: LuatOS CORE-ESP32 C3
+- **Microcontroller**: ESP32-C3 (32-bit RISC-V, single-core, 160 MHz)
+- **Flash Memory**: 4 MB
+- **RAM**: 384 KB (internal SRAM)
+- **Connectivity**: 802.11 b/g/n WiFi, BLE 5.0
+
+### 3.2 LED Configuration
+- **GPIO Pin**: GPIO 13 (also labeled D5)
+- **Logic Level**: Active HIGH (LED ON when GPIO = 1, OFF when GPIO = 0)
+- **Current Rating**: Typical 20 mA per onboard LED
+- **Protection**: Built-in current limiting resistor
+
+### 3.3 Power Supply
+- **Source**: USB only (5V nominal)
+- **No Battery**: System operates continuously while powered
+- **No Low-Power Modes**: Always fully active during normal operation
+
+### 3.4 Communication Interfaces
+- **Serial UART**: USB-to-Serial bridge (automatic via USB)
+  - Baud Rate: 115200
+  - Data Bits: 8
+  - Stop Bits: 1
+  - Parity: None
+  - Flow Control: None
+- **WiFi**: 2.4 GHz 802.11 b/g/n (integrated antenna)
+
+---
+
+## 4. Software Environment
+
+### 4.1 Development Tools
+- **IDE**: Visual Studio Code (VS Code)
+- **Build System**: PlatformIO
+- **Framework**: Arduino (ESP32 core v2.0+)
+- **Language**: C++
+- **Compiler**: GCC ARM Embedded Toolchain (via ESP-IDF)
+
+### 4.2 Core Libraries
+- **Arduino Framework**: Built-in Serial, GPIO, WiFi, Update APIs
+- **FreeRTOS**: Included in ESP32 core; provides task scheduling
+- **mbedTLS**: Built into ESP-IDF; provides SHA-256
+- **HTTPClient**: Arduino WiFi library component
+
+### 4.3 Compilation & Flashing
+- **Build Command**: `pio run`
+- **Upload Command**: `pio run -t upload`
+- **Flash Size**: Firmware binary ~300-500 KB
+- **OTA File Format**: Single ESP32 binary (.bin) without metadata
+
+---
+
+## 5. Functional Requirements
+
+### 5.1 LED Blinking (SOS Pattern)
+
+#### 5.1.1 Morse Code Timing
+- **Time Unit (TU)**: 300 milliseconds
+- **Dot**: 1 TU ON (300 ms)
+- **Dash**: 3 TU ON (900 ms)
+- **Symbol Gap**: 1 TU OFF (300 ms) — gap between dot/dash within a letter
+- **Letter Gap**: 3 TU OFF (900 ms) — gap between letters; replaces symbol gap (no double gap)
+- **Cycle Gap**: 7 TU OFF (2100 ms) — gap between end of 'S' and start of new 'O'
+
+#### 5.1.2 SOS Pattern Breakdown
+```
+Letter 'S': dot-dot-dot
+  - ON 300ms → OFF 300ms (symbol gap)
+  - ON 300ms → OFF 300ms (symbol gap)
+  - ON 300ms → OFF 900ms (letter gap, includes symbol gap replacement)
+
+Letter 'O': dash-dash-dash
+  - ON 900ms → OFF 300ms (symbol gap)
+  - ON 900ms → OFF 300ms (symbol gap)
+  - ON 900ms → OFF 900ms (letter gap, includes symbol gap replacement)
+
+Letter 'S': dot-dot-dot
+  - ON 300ms → OFF 300ms (symbol gap)
+  - ON 300ms → OFF 300ms (symbol gap)
+  - ON 300ms → OFF 2100ms (cycle gap, then repeat)
+
+Total cycle time: (300+300)×2 + 300 + 900 + (900+300)×2 + 900 + (300+300)×2 + 300 + 2100 = 11,100 ms (11.1 seconds)
+```
+
+#### 5.1.3 LED Control
+- GPIO 13 configured as OUTPUT
+- Logic: GPIO = HIGH → LED ON, GPIO = LOW → LED OFF
+- No PWM; binary control only
+
+### 5.2 WiFi Connectivity
+
+#### 5.2.1 Connection Parameters
+- **SSID**: Hardcoded in firmware (configured in `platformio.ini` or constants in code)
+- **Password**: Hardcoded in firmware
+- **Security**: WPA2/WPA3 (auto-negotiated)
+- **Auto-Connection**: Enabled; connects on boot
+
+#### 5.2.2 Retry Logic
+- **Retry Interval**: 10 seconds
+- **Retry Limit**: Infinite (retry forever)
+- **Connection Timeout**: 30 seconds per attempt
+- **Status Reporting**: Log connection state changes (INFO level)
+
+#### 5.2.3 Status Information
+- Connected: RSSI signal strength logged
+- Disconnected: Reason code logged (if available)
+- Reconnecting: Log every retry attempt (DEBUG level)
+
+### 5.3 OTA Updates
+
+#### 5.3.1 Update Trigger Mechanisms
+**Automatic on Boot**:
+- Attempt OTA update check immediately after WiFi connection established
+- If OTA fails, continue normal operation with current firmware
+- Do not retry boot-time OTA
+
+**Manual Trigger**:
+- Serial command: `OTA_UPDATE\n` (terminated by newline)
+- Parser case-insensitive
+- Response: INFO-level log confirming trigger received
+
+#### 5.3.2 OTA Download & Installation
+- **Source**: HTTP server at configurable URL (single .bin file, no JSON wrapper)
+- **Transport**: HTTP (not HTTPS; no certificate validation required)
+- **Request Method**: HTTP GET
+- **Timeout**: 60 seconds for entire download/flash sequence
+- **Buffer**: Stream directly to flash partition (no RAM buffering)
+
+#### 5.3.3 Firmware Verification
+- **Method**: SHA-256 hash comparison
+- **Expected Hash**: Hardcoded in firmware or embedded in firmware header
+- **Validation**: Compute SHA-256 of downloaded binary before flash write
+- **Failure Action**: Do NOT flash if hash mismatch; revert to current firmware
+- **Success Action**: Write new firmware and schedule reboot (within 2 seconds)
+
+#### 5.3.4 LED & Task Behavior During OTA
+- **LED Suspension**: Suspend LED task before OTA download starts
+- **LED State**: Force GPIO 13 LOW (LED OFF) to avoid visual confusion
+- **Resume**: Resume LED task after flash completes (before reboot)
+- **Task Queuing**: OTA task shares queue for logging; use synchronized writes
+
+#### 5.3.5 Boot Behavior After Update
+- **Cold Boot After Reboot**: Boot with new firmware
+- **Automatic Reconnect**: WiFi task re-establishes connection
+- **LED Task**: Resumes SOS pattern immediately
+- **Logging**: Log firmware version or build timestamp to confirm update success
+
+### 5.4 Serial Logging
+
+#### 5.4.1 Logger Configuration
+- **Baud Rate**: 115200 (hardware default for LuatOS CORE-ESP32 C3)
+- **Format**: `[TIMESTAMP] [LEVEL] [MODULE]: MESSAGE`
+- **Timestamp**: Milliseconds since boot (unsigned 32-bit, format: `%u`)
+- **Levels**: DEBUG, INFO, ERROR
+- **Default Level**: INFO (DEBUG messages not printed by default)
+
+#### 5.4.2 Logger Task
+- **Queue**: Receives log messages from all other tasks via FreeRTOS queue
+- **Output**: Serial.print() (non-blocking write to hardware UART)
+- **Buffer Overflow**: Drop oldest messages if queue full (no blocking)
+- **Queue Size**: Minimum 16 messages
+
+#### 5.4.3 Log Sources
+- **WiFi Task**: Connection state changes, IP address, RSSI, errors
+- **LED Task**: Pattern state transitions (DEBUG), GPIO toggling (DEBUG)
+- **OTA Task**: Download progress, hash verification, flash write, reboot countdown, errors
+- **Serial Handler**: Command received, OTA trigger acknowledged
+- **Logger Task**: Queue overflow (if applicable)
+- **Main Setup**: Boot message with firmware version/timestamp
+
+### 5.5 Serial Command Interface
+
+#### 5.5.1 Command Format
+- **Delimiter**: Newline character (`\n` or `\r\n`)
+- **Parsing**: Case-insensitive; trim whitespace
+- **Echo**: Do NOT echo command back to serial
+- **Acknowledgment**: Log INFO message upon successful parsing
+
+#### 5.5.2 Supported Commands
+```
+OTA_UPDATE    - Trigger manual OTA firmware update
+              - Response: [timestamp] [INFO] SERIAL: OTA update triggered
+              - Queues OTA task for execution
+```
+
+#### 5.5.3 Invalid Commands
+- **Behavior**: Log ERROR message; no action taken
+- **Format**: `[timestamp] [ERROR] SERIAL: Unknown command: {command}`
+
+---
+
+## 6. Task Architecture
+
+### 6.1 Task Definitions
+
+#### 6.1.1 LED Task (Priority 1 — Lowest)
+```
+Name:       ledTask
+Priority:   1
+Stack:      2048 bytes
+Frequency:  Driven by vTaskDelay(); generates SOS pattern (11.1 sec cycle)
+Blocking:   Can be suspended by OTA task
+Purpose:    Generates Morse code SOS pattern via GPIO 13
+
+State Machine:
+  - Maintains counter for current symbol in SOS sequence
+  - Each vTaskDelay() call: state advances, GPIO updated
+  - No external synchronization (independent operation)
+```
+
+#### 6.1.2 WiFi Task (Priority 3)
+```
+Name:       wifiTask
+Priority:   3
+Stack:      4096 bytes
+Frequency:  Runs every 10 seconds (delay between retries)
+Blocking:   WiFi connection attempt can block up to 30 seconds
+Purpose:    Establish and maintain WiFi connection; retry on failure
+
+State Machine:
+  - DISCONNECTED → attempt connection (30-second timeout)
+  - If successful → CONNECTED (log IP, RSSI)
+  - If failed → wait 10 seconds → retry DISCONNECTED
+  - On CONNECTED: check connection status every 5 seconds
+  - If lost → revert to DISCONNECTED
+```
+
+#### 6.1.3 OTA Task (Priority 3)
+```
+Name:       otaTask
+Priority:   3
+Stack:      6144 bytes
+Frequency:  Triggered by event flag (boot or serial command)
+Blocking:   HTTP download/flash can block up to 60 seconds
+Purpose:    Download firmware via HTTP, verify SHA-256, flash if valid
+
+State Machine:
+  - IDLE → wait for trigger
+  - TRIGGERED → suspend LED task, force LED off
+  - DOWNLOAD → HTTP GET to OTA URL (60-second timeout)
+  - VERIFY → compute SHA-256, compare to expected
+  - FLASH → write to OTA partition
+  - REBOOT → schedule reboot, resume LED task, exit
+  - FAILURE → resume LED task, return to IDLE
+
+Synchronization:
+  - Use EventGroup flag for boot-time OTA trigger
+  - Use queue message for manual OTA trigger (serial command)
+  - Handle both without race conditions
+```
+
+#### 6.1.4 Logger Task (Priority 2)
+```
+Name:       loggerTask
+Priority:   2
+Stack:      2048 bytes
+Frequency:  Wakes on queue message (blocking xQueueReceive)
+Blocking:   Serial.print() non-blocking; task blocks waiting for messages
+Purpose:    Format and output log messages to serial UART
+
+Behavior:
+  - Blocks on xQueueReceive() with 100ms timeout
+  - Formats message: [%u] [%s] %s
+  - Writes to Serial without buffering
+  - Discards message if queue full (no blocking producer)
+```
+
+#### 6.1.5 Serial Handler (Main Loop Priority 4 — Highest)
+```
+Location:   setup() and loop()
+Priority:   4 (implicit; runs when other tasks block/delay)
+Purpose:    Monitor serial input for commands
+
+Behavior:
+  - setup(): Initialize serial at 115200, GPIO pins, queues, tasks, WiFi
+  - loop(): Check Serial.available(), read line, parse command
+  - Command matching: OTA_UPDATE → queue to OTA task
+  - Non-blocking: Uses Serial.readStringUntil('\n')
+```
+
+### 6.2 Task Communication
+
+| From | To | Mechanism | Data |
+|------|-----|-----------|------|
+| All Tasks | Logger | FreeRTOS Queue | Log message struct |
+| Serial Handler | OTA Task | Event Flag / Direct trigger | Null (event only) |
+| WiFi Task | All Tasks | Global variable (read-only) | `isWiFiConnected` flag |
+| OTA Task | LED Task | xTaskSuspend / xTaskResume | Null |
+
+### 6.3 Synchronization Strategy
+- **Queues**: Used for logging only; multiple producers, single consumer
+- **Suspend/Resume**: Used for LED task during OTA (mutual exclusion)
+- **Global Flags**: Used for WiFi connection state (read-only from other tasks)
+- **No Mutexes**: Not required; no shared mutable state except logging queue
+
+---
+
+## 7. Error Handling
+
+### 7.1 WiFi Errors
+- **Connection Timeout**: Log ERROR, wait 10 seconds, retry
+- **Lost Connection**: Log INFO, attempt reconnect
+- **Invalid SSID/Password**: Log ERROR, retry forever (user will observe pattern)
+
+### 7.2 OTA Errors
+- **HTTP Download Failure**: Log ERROR, keep current firmware, resume LED task
+- **SHA-256 Mismatch**: Log ERROR, do NOT flash, resume LED task
+- **Flash Write Failure**: Log ERROR, revert to previous firmware (ESP32 OTA partition handles rollback)
+- **Timeout (60 sec)**: Log ERROR, abort download, resume LED task
+- **WiFi Disconnected During OTA**: Log ERROR, abort, resume LED task
+
+### 7.3 LED Task Errors
+- **GPIO Write Failure**: Log ERROR (rare on ESP32), continue attempting
+- **Task Suspension Timeout**: Log ERROR, force resume after 5 minutes
+
+### 7.4 Logging Errors
+- **Queue Full**: Drop incoming message silently; log overflow once per minute (prevent spam)
+- **Serial Port Unavailable**: Skip write (rare), attempt next message
+
+### 7.5 Recovery Strategy
+- **Automatic Recovery**: All tasks attempt recovery and resume operation
+- **No Reboot on Error**: Only reboot on successful OTA update
+- **Manual Intervention**: User can trigger OTA_UPDATE command or power cycle
+
+---
+
+## 8. Logging Specification
+
+### 8.1 Log Message Format
+```
+[%10u] [%-5s] %s: %s
+ │      │     │    └─ Message text
+ │      │     └─ Module name (WIFI, OTA, LED, etc.)
+ │      └─ Log level (DEBUG, INFO, ERROR)
+ └─ Milliseconds since boot (right-aligned, 10 chars)
+```
+
+### 8.2 Example Log Output
+```
+[        100] [INFO ] SETUP: Firmware built 2026-02-27
+[        250] [INFO ] SETUP: LED task started
+[        300] [INFO ] SETUP: WiFi task started
+[        350] [INFO ] SETUP: OTA task started
+[       1000] [INFO ] WIFI: Attempting connection to MySSID
+[      15000] [INFO ] WIFI: Connected to MySSID, IP: 192.168.1.100, RSSI: -65 dBm
+[      15500] [DEBUG] LED: SOS cycle starting
+[      16000] [DEBUG] LED: Dot ON
+[      50000] [INFO ] SERIAL: OTA update triggered
+[      50100] [INFO ] OTA: Suspending LED task for OTA
+[      50200] [INFO ] OTA: Downloading from http://example.com/firmware.bin
+[      55000] [INFO ] OTA: SHA-256 verification passed
+[      56000] [INFO ] OTA: Firmware flashed successfully
+[      56100] [INFO ] OTA: Rebooting in 2 seconds...
+```
+
+### 8.3 Log Levels
+- **DEBUG**: Verbose state transitions, GPIO changes, task events (disabled by default in INFO mode)
+- **INFO**: Connection state, OTA progress, command acknowledgments, normal operation events
+- **ERROR**: WiFi failures, OTA errors, invalid commands, exception conditions
+
+---
+
+## 9. Power Behavior
+
+### 9.1 Power Modes
+- **Active Mode** (Only mode supported): CPU at 160 MHz, WiFi active, LED task running
+- **Sleep/Low-Power**: Not implemented; system always active
+
+### 9.2 Power Consumption
+- **Idle**: ~40 mA (WiFi active, LED off)
+- **LED ON**: ~60-80 mA (LED adds 20-40 mA)
+- **OTA Download**: ~100-150 mA (WiFi + LED off + CPU intensive)
+- **Typical Average**: ~50 mA (most time LED pulsing SOS pattern)
+
+### 9.3 Power Supply Requirements
+- **Voltage**: 5V ± 5% (USB standard)
+- **Current Capacity**: Minimum 500 mA (USB 2.0 full-speed port)
+- **No Backup Battery**: Not supported
+
+---
+
+## 10. Configuration Parameters
+
+### 10.1 Firmware-Level Constants
+```c
+#define LED_PIN                 13          // GPIO 13
+#define WIFI_SSID               "YourSSID"  // Hardcoded
+#define WIFI_PASSWORD           "YourPass"  // Hardcoded
+#define OTA_URL                 "http://example.com/firmware.bin"
+#define OTA_EXPECTED_SHA256     "abc123..."  // 64-char hex string
+#define SERIAL_BAUD             115200
+#define LED_TIME_UNIT_MS        300         // Milliseconds
+#define WIFI_RETRY_INTERVAL_MS  10000       // 10 seconds
+#define WiFi_TIMEOUT_MS         30000       // 30 seconds
+#define OTA_TIMEOUT_MS          60000       // 60 seconds
+```
+
+### 10.2 Task Stack Sizes
+```c
+#define LED_TASK_STACK          2048        // bytes
+#define WIFI_TASK_STACK         4096        // bytes
+#define OTA_TASK_STACK          6144        // bytes
+#define LOGGER_TASK_STACK       2048        // bytes
+```
+
+### 10.3 Queue Sizes
+```c
+#define LOG_QUEUE_SIZE          16          // messages
+#define LOG_MESSAGE_SIZE        256         // bytes per message
+```
+
+---
+
+## 11. Success Criteria
+
+### 11.1 Functional Tests
+- **[ ]** LED blinks SOS pattern continuously with correct timing (11.1-second cycle)
+- **[ ]** LED pattern continues uninterrupted for at least 24 hours
+- **[ ]** WiFi connects to hardcoded SSID on boot within 30 seconds
+- **[ ]** WiFi reconnects automatically after connection loss
+- **[ ]** Serial logs all events with correct format and timestamps
+- **[ ]** Serial command `OTA_UPDATE\n` is parsed and acknowledged
+
+### 11.2 OTA Tests
+- **[ ]** Automatic OTA attempt triggers after WiFi connection
+- **[ ]** Manual OTA update via serial command completes successfully
+- **[ ]** SHA-256 verification passes for valid firmware
+- **[ ]** SHA-256 verification fails and prevents flash for corrupted firmware
+- **[ ]** LED task suspended during OTA (no concurrent blinking)
+- **[ ]** LED forced OFF during OTA (clear visual indicator)
+- **[ ]** LED resumes SOS pattern after OTA completes
+- **[ ]** Device reboots and runs new firmware after successful OTA
+
+### 11.3 Robustness Tests
+- **[ ]** WiFi reconnects after 10-second retry interval
+- **[ ]** OTA failure logs ERROR and resumes LED task without crash
+- **[ ]** Serial input with invalid commands logged as ERROR
+- **[ ]** Power cycle does not corrupt firmware or lose configuration
+- **[ ]** Logging queue handles rapid messages without data loss (INFO+ levels)
+
+### 11.4 Performance Tests
+- **[ ]** LED task CPU usage < 5%
+- **[ ]** WiFi task CPU usage < 10% (connected state)
+- **[ ]** Serial logging does not block LED task
+- **[ ]** OTA download completes within 60 seconds on typical internet (~50 kB file on 2 Mbps connection)
+
+---
+
+## 12. Appendix: Timing Diagram
+
+### 12.1 SOS Pattern Timing (Single Cycle = 11.1 seconds)
+```
+Time (ms):  0     300  600  900  1200 1500 1800 2100 2400 2700 3000 3300 3600 3900 4200 4500 4800 5100 5400 5700 6000 6300 6600 6900 7200 7500 7800 8100 8400 8700 8900 9000 10000 11100
+
+LED State:  ─┐  ┌──┐  └──┐  ┌──┐  └──┐  ┌──────┐  └──────┐  ┌──────┐  └──────┐  ┌──┐  └──┐  ┌──┐  └──┐  ┌──┐  └─────────────┐  └────
+
+Symbol:     S.  .   .    .   |     |   O     -      -      -      |     |    S.  .   .    .   |                    (repeat)
+
+Legend:
+  ─: OFF (gap)
+  ┌: Transition OFF→ON
+  ┐: Transition ON→OFF
+  S: Letter 'S' - dot-dot-dot (each 300ms ON + 300ms OFF)
+  O: Letter 'O' - dash-dash-dash (each 900ms ON + 300ms OFF)
+  .: Dot (300ms ON)
+  -: Dash (900ms ON)
+  |: Letter gap (900ms OFF total, including symbol gap replacement)
+```
+
+---
+
+**End of FSD**
